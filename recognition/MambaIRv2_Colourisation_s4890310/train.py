@@ -4,13 +4,16 @@ import os
 import json
 import numpy as np
 import torch
+import time
+import random
 import torch.nn.functional as F
 import matplotlib
 matplotlib.use('Agg')                      # save plots to files (no screen needed)
 import matplotlib.pyplot as plt
 import lpips
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
-from dataset import lab_tensors_to_rgb
+from modules import build_pretrained_MambaDenoiser, LabColouriser
+from dataset import get_data_loaders, lab_tensors_to_rgb
 
 warnings.filterwarnings('ignore', category=UserWarning, module='skimage')   # out-of-gamut notices
 
@@ -38,7 +41,6 @@ def parse_args():
 
 #defining colourfulness
 def colourfulness(rgb):
-    """Hasler & Suesstrunk (2003) colourfulness of an RGB uint8 image (higher = more colourful)."""
     r, g, b = (rgb[..., i].astype(np.float64) for i in range(3))
     rg, yb = r - g, 0.5 * (r + g) - b
     return np.sqrt(rg.std() ** 2 + yb.std() ** 2) + 0.3 * np.sqrt(rg.mean() ** 2 + yb.mean() ** 2)
@@ -176,3 +178,155 @@ def validate_and_save(model, val_loader, metrics, device, args, it, history, opt
     with open(os.path.join(args.out, 'history.json'), 'w') as f:
         json.dump(history, f)
     return best
+
+
+#Testing
+
+@torch.no_grad() #no gradient tracking since we are just evaluating the model on the test set
+def test(model, test_loader, metrics, device, args):
+#test the best checkpoint saved and compare to the untuned pretrained MambaIRv2 model
+    ckpt = torch.load(os.path.join(args.out, 'best.pth'), map_location='cpu')
+    model.load_state_dict(ckpt['params'])
+    model.eval() #evluation mode (no checkpointing)
+    print(f'testing best checkpoint from iteration {ckpt["iter"]}', flush=True) #says the iteration number of the best chekpoint
+
+    untuned = build_pretrained_MambaDenoiser(args.weights).to(device).eval()   # baseline: RGB in, RGB out
+
+    names = ['Greyscale input', 'Untuned MambaIRv2', 'Fine-tuned']
+    rows = {n: [] for n in names}
+    times, peak = [], 0.0
+    bleed_dir = os.path.join(args.out, 'test', 'bleed_check')       # for AC4, inspect these by eye
+    os.makedirs(bleed_dir, exist_ok=True)
+    bleed_ids = set(random.Random(args.seed).sample(range(len(test_loader)), min(20, len(test_loader))))
+
+    for k, (L, ab) in enumerate(test_loader):
+        L, ab = L.to(device), ab.to(device)
+
+        # for finetuned model: time and peak memory for AC5
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
+        t = time.time()
+        ab_pred = predict_ab(model, L)
+        torch.cuda.synchronize()
+        times.append(time.time() - t)
+        peak = max(peak, torch.cuda.max_memory_allocated() / 1e9)
+
+        gt = lab_tensors_to_rgb(L[0], ab[0])
+        grey = lab_tensors_to_rgb(L[0], torch.zeros_like(ab[0]))
+        tuned = lab_tensors_to_rgb(L[0], ab_pred[0])
+
+        # untuned pretrained model, given the greyscale image as RGB
+        grey_t = torch.from_numpy(grey).permute(2, 0, 1)[None].float().div(255).to(device)
+        with torch.autocast('cuda', dtype=torch.bfloat16):
+            base = untuned(grey_t).float().clamp(0, 1)
+        base = (base[0].permute(1, 2, 0).cpu().numpy() * 255).round().astype(np.uint8)
+
+        for name, img in zip(names, [grey, base, tuned]):
+            rows[name].append(metrics(img, gt))
+        if k in bleed_ids:
+            save_panel(os.path.join(bleed_dir, f'test_{k:03d}.png'), [grey, base, tuned, gt],
+                       ['Greyscale input', 'Untuned MambaIRv2', 'Fine-tuned (ours)', 'Ground truth'])
+
+    results = {n: summarise(rows[n]) for n in names}
+    mean_time = float(np.mean(times[1:] if len(times) > 1 else times))   # skip the warm-up image
+    results['inference'] = {'mean_seconds_per_image': mean_time, 'peak_vram_gb': peak}
+
+    tuned, untuned_r = results['Fine-tuned'], results['Untuned MambaIRv2']
+    checks = {
+        'AC1 colourfulness within 15% of ground truth': abs(tuned['colour_ratio'] - 1) <= 0.15,
+        'AC2 LPIPS lower than untuned MambaIRv2': tuned['lpips'] < untuned_r['lpips'],
+        'AC3 SSIM no lower than untuned MambaIRv2': tuned['ssim'] >= untuned_r['ssim'],
+        'AC5 peak VRAM < 15 GB and < 1 s per image': peak < 15 and mean_time < 1,
+    }
+    results['acceptance_criteria'] = checks
+
+    print('\nTEST RESULTS (100 held-out DIV2K images, longest side 512 px)')
+    print(f'{"method":<20} {"PSNR":>7} {"SSIM":>7} {"LPIPS":>7} {"colour ratio":>13}')
+    for n in names:
+        r = results[n]
+        print(f'{n:<20} {r["psnr"]:7.2f} {r["ssim"]:7.4f} {r["lpips"]:7.4f} {r["colour_ratio"]:13.3f}')
+    print(f'inference: {mean_time:.3f} s/image, peak VRAM {peak:.2f} GB')
+    for name, ok in checks.items():
+        print(f'  {"PASS" if ok else "FAIL"}  {name}')
+    print(f'  CHECK BY EYE  AC4 colour bleeding: see {bleed_dir}')
+
+    with open(os.path.join(args.out, 'test_results.json'), 'w') as f:
+        json.dump(results, f, indent=2)
+
+#Main
+
+def main():
+    args = parse_args()
+    if not torch.cuda.is_available():
+        raise SystemExit('A CUDA GPU is required (MambaIRv2 uses mamba_ssm CUDA kernels).')
+    device = torch.device('cuda')
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    os.makedirs(args.out, exist_ok=True)
+
+    train_loader, val_loader, test_loader = get_data_loaders(args.data, crop=args.crop, batch_size=args.batch, seed=args.seed, num_workers=args.workers)
+    metrics = Metrics(device)
+    model = LabColouriser(build_pretrained_MambaDenoiser(args.weights),
+                          use_checkpoint=not args.no_checkpoint).to(device)
+
+    if not args.test_only:
+        # two learning rates: new layers learn fast, the pretrained body adapts slowly
+        new_params = list(model.conv_in.parameters()) + list(model.conv_out.parameters())
+        new_ids = {id(p) for p in new_params}
+        body_params = [p for p in model.parameters() if p.requires_grad and id(p) not in new_ids]
+        opt = torch.optim.Adam([{'params': new_params, 'lr': args.lr_new},
+                                {'params': body_params, 'lr': args.lr_body}])
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.iters)
+
+        it, best = 0, float('inf')
+        history = {'train_loss': [], 'val': [], 'args': vars(args)}
+        last_path = os.path.join(args.out, 'last.pth')
+        if args.resume and os.path.exists(last_path):
+            ckpt = torch.load(last_path, map_location='cpu')
+            model.load_state_dict(ckpt['params'])
+            opt.load_state_dict(ckpt['optimizer'])
+            sched.load_state_dict(ckpt['scheduler'])
+            it, history, best = ckpt['iter'], ckpt['history'], ckpt['best']
+            print(f'resumed from iteration {it}', flush=True)
+
+        if it == 0:   # "before fine-tuning" numbers
+            best = validate_and_save(model, val_loader, metrics, device, args, it, history, opt, sched, best)
+
+        print(f'training for {args.iters} iterations: batch {args.batch}, crop {args.crop}', flush=True)
+        model.train()
+        start = time.time()
+        stop = False
+        while it < args.iters and not stop:
+            for L, ab in train_loader:
+                L, ab = L.to(device, non_blocking=True), ab.to(device, non_blocking=True)
+                with torch.autocast('cuda', dtype=torch.bfloat16):    # faster, less memory
+                    pred = model(L)
+                loss = F.l1_loss(pred.float(), ab)                     # L1 on the ab channels
+
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                opt.step()
+                sched.step()
+                it += 1
+                history['train_loss'].append((it, loss.item()))
+
+                hours = (time.time() - start) / 3600
+                stop = args.time_limit is not None and hours >= args.time_limit
+                if it % args.log_every == 0:
+                    print(f'iter {it}/{args.iters}  loss {loss.item():.4f}  '
+                          f'lr {sched.get_last_lr()[1]:.2e}  '
+                          f'peak VRAM {torch.cuda.max_memory_allocated() / 1e9:.1f} GB  '
+                          f'{hours:.2f} h', flush=True)
+                if it % args.val_every == 0 or it == args.iters or stop:
+                    best = validate_and_save(model, val_loader, metrics, device, args,
+                                             it, history, opt, sched, best)
+                if it >= args.iters or stop:
+                    if stop:
+                        print(f'time limit of {args.time_limit} h reached at iteration {it}', flush=True)
+                    break
+
+    test(model, test_loader, metrics, device, args)
+
+
+if __name__ == '__main__':
+    main()
