@@ -40,7 +40,24 @@ class LabColouriser(nn.Module):
             p.requires_grad = False
 
     def forward(self, L):
-        x = self.conv_in(L)
+        b = self.base
 
-        residual = self.base.conv_after_body(self.base.forward_features(x)) + x
-        return self.conv_out(residual)
+        h_old, w_old = L.shape[-2:]
+        mod = b.window_size
+        h = ((h_old + mod - 1) // mod) * mod #pad L channel to multiple of window size (16)
+        w = ((w_old + mod - 1) // mod) * mod
+        x = torch.cat([L, torch.flip(L, [2])], 2)[:, :, :h, :] #padding by flipping image upsidedown and concatenating it to itself
+        x = torch.cat([x, torch.flip(x, [3])], 3)[:, :, :, :w] #padding by flipping image left to right and concatenating it to itself
+
+        x = (x - b.mean.type_as(x).mean()) * b.img_range #applies same scaling as pretrained model
+
+        params = {'attn_mask': b.calculate_mask([h, w]).to(x.device), 'rpi_sa': b.relative_position_index_SA} #same as pretrained model
+
+        x_first = self.conv_in(x) #makes L channel into 174 feature channels, same as pretrained model's first conv layer
+
+        residual = b.conv_after_body(b.forward_features(x_first, params)) + x_first #skip connection, runs pretrained forward pass plus an extra conv layer
+        # after the body to match the pretrained model's architecture
+
+        ab = self.conv_out(residual)
+        
+        return ab[..., :h_old, :w_old] #output is cropped to match the original L channel's dimensions
