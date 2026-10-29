@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+from torch.utils.checkpoint import checkpoint
 from mambairv2_arch import MambaIRv2
 
 MambaDenoiser_URL = 'https://huggingface.co/cguoh/MambaIR/resolve/main/MambaIRv2_ckpt/mambairv2_ColorDN_15.pth'
@@ -19,9 +20,10 @@ def build_pretrained_MambaDenoiser(checkpoint_path=None):
     return model
 
 class LabColouriser(nn.Module):
-    def __init__(self, base):
+    def __init__(self, base, use_checkpoint=True):
         super().__init__()
         self.base = base
+        self.use_checkpoint = use_checkpoint
 
         old_in = base.conv_first
         self.conv_in = nn.Conv2d(1, old_in.out_channels, kernel_size=old_in.kernel_size, stride=old_in.stride, padding=old_in.padding)
@@ -39,6 +41,23 @@ class LabColouriser(nn.Module):
         for p in list(old_in.parameters()) + list(old_out.parameters()):
             p.requires_grad = False
 
+    def forward_features(self, x, params):
+        b = self.base
+        x_size = (x.shape[2], x.shape[3])
+        x = b.patch_embed(x)
+        if b.ape:
+            x = x + b.absolute_pos_embed
+
+        for layer in b.layers:
+            if self.use_checkpoint and self.training:
+                x = checkpoint(layer, x, x_size, params, use_reentrant=False)
+            else:
+                x = layer(x, x_size, params)
+
+        x = b.norm(x)
+        return b.patch_unembed(x, x_size)
+
+
     def forward(self, L):
         b = self.base
 
@@ -55,7 +74,7 @@ class LabColouriser(nn.Module):
 
         x_first = self.conv_in(x) #makes L channel into 174 feature channels, same as pretrained model's first conv layer
 
-        residual = b.conv_after_body(b.forward_features(x_first, params)) + x_first #skip connection, runs pretrained forward pass plus an extra conv layer
+        residual = b.conv_after_body(self.forward_features(x_first, params)) + x_first #skip connection, runs pretrained forward pass plus an extra conv layer
         # after the body to match the pretrained model's architecture
 
         ab = self.conv_out(residual)
