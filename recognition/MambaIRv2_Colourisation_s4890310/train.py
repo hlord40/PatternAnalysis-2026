@@ -1,6 +1,7 @@
 import argparse
 import warnings
 import os
+import json
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -9,6 +10,7 @@ matplotlib.use('Agg')                      # save plots to files (no screen need
 import matplotlib.pyplot as plt
 import lpips
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+from dataset import lab_tensors_to_rgb
 
 warnings.filterwarnings('ignore', category=UserWarning, module='skimage')   # out-of-gamut notices
 
@@ -120,3 +122,57 @@ def plot_history(history, path):
     fig.tight_layout()
     fig.savefig(path, dpi=100)
     plt.close(fig)
+
+
+#Validation
+
+@torch.no_grad() #no gradient tracking since we are just evaluating the model on the validation set
+def evaluate(model, loader, metrics, device, save_dir=None, n_save=3):
+    """Colourise every image in the loader and return the averaged metrics."""
+    model.eval() #no checkpointing
+    rows, l1 = [], []
+    for k, (L, ab) in enumerate(loader):
+        L, ab = L.to(device), ab.to(device)
+        ab_pred = predict_ab(model, L)
+        l1.append(F.l1_loss(ab_pred, ab).item())
+
+        pred = lab_tensors_to_rgb(L[0], ab_pred[0])
+        gt = lab_tensors_to_rgb(L[0], ab[0])
+        rows.append(metrics(pred, gt))
+
+        if save_dir is not None and k < n_save: #save 3 images
+            grey = lab_tensors_to_rgb(L[0], torch.zeros_like(ab[0]))
+            save_panel(os.path.join(save_dir, f'val_{k}.png'), [grey, pred, gt],
+                       ['Greyscale input', 'Prediction', 'Ground truth'])
+    model.train() #back into training mode
+    result = summarise(rows)
+    result['l1_ab'] = float(np.mean(l1))
+    return result
+
+
+def save_checkpoint(path, model, opt, sched, it, history, best): #everything able to resume training is saved
+    torch.save({'params': model.state_dict(), 'optimizer': opt.state_dict(),
+                'scheduler': sched.state_dict(), 'iter': it, 'history': history, 'best': best}, path)
+
+
+def validate_and_save(model, val_loader, metrics, device, args, it, history, opt, sched, best):
+#run validation, save the best checkpoint, and save the training history and plots
+    sample_dir = os.path.join(args.out, 'samples', f'iter{it:06d}')
+    os.makedirs(sample_dir, exist_ok=True)
+    v = evaluate(model, val_loader, metrics, device, save_dir=sample_dir)
+    v['iter'] = it
+    history['val'].append(v)
+    print(f'[val] iter {it}: L1 {v["l1_ab"]:.4f}  PSNR {v["psnr"]:.2f}  SSIM {v["ssim"]:.4f}  '
+          f'LPIPS {v["lpips"]:.4f}  colourfulness ratio {v["colour_ratio"]:.3f}', flush=True)
+
+    if v['lpips'] < best:
+        best = v['lpips']
+        torch.save({'params': model.state_dict(), 'iter': it, 'val': v},
+                   os.path.join(args.out, 'best.pth'))
+        print(f'  new best checkpoint (LPIPS {best:.4f})', flush=True)
+
+    save_checkpoint(os.path.join(args.out, 'last.pth'), model, opt, sched, it, history, best)
+    plot_history(history, os.path.join(args.out, 'training_curves.png'))
+    with open(os.path.join(args.out, 'history.json'), 'w') as f:
+        json.dump(history, f)
+    return best
