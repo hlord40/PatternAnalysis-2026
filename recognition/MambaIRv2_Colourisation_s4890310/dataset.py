@@ -82,14 +82,3 @@ def get_data_loaders(root, crop=128, batch_size=8, seed=67, num_workers=4, crop_
     val_loader = DataLoader(DIV2K(val_paths, train=False), batch_size=1, shuffle=False, num_workers=num_workers)
     test_loader = DataLoader(DIV2K(test_paths, train=False), batch_size=1, shuffle=False, num_workers=num_workers)
     return train_loader, val_loader, test_loader
-
-if __name__ == '__main__':
-    # quick check: python dataset.py /path/to/folder/containing/DIV2K_train_HR
-    import sys
-    root = sys.argv[1] if len(sys.argv) > 1 else 'data'
-    train_loader, val_loader, test_loader = get_data_loaders(root, num_workers=0)
-    print('train samples:', len(train_loader.dataset),
-          '| val images:', len(val_loader.dataset),
-          '| test images:', len(test_loader.dataset))
-    L, ab = next(iter(train_loader))
-    print('train batch:', tuple(L.shape), tuple(ab.shape))
