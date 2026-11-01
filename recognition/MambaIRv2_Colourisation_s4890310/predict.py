@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import cv2
 import time
 import glob
+import torch.nn.functional as F
 
 from dataset import lab_tensors_to_rgb, rgb_to_lab_tensors
 
@@ -14,6 +15,8 @@ fine_tuned_weights = os.path.expanduser('~/runs/main/best.pth')
 pretrained_model = os.path.expanduser('~/comp3170/MambaIR/experiments/mambairv2_ColorDN_15.pth')
 input_test = os.path.expanduser('~/comp3170/greyscale-colorization/test-dataset')
 output_test = os.path.expanduser('~/runs/predictions')
+
+max_side = 1024
 
 def sort_test_folder(path): #sorts the test folder so that images are in numerical order
     return [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', os.path.basename(path))]
@@ -26,9 +29,20 @@ def load_model(device):
 @torch.no_grad()
 def predict(model, rgb, device):
     L, ab_input = rgb_to_lab_tensors(rgb)
+
+    h, w = rgb.shape[:2]
+    scale = min(1.0, max_side / max(h, w))
+    if scale < 1.0:
+        small = cv2.resize(rgb, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
+        L_model, _ = rgb_to_lab_tensors(small)
+    else:
+        L_model = L
     with torch.autocast('cuda', dtype=torch.bfloat16): #autocast for faster inference
-        ab = model(L[None].to(device))
+        ab = model(L_model[None].to(device))
     ab = ab.float().clamp(-1, 1) #need values between -1 and 1 for lab2rgb to work
+
+    if scale <1.0:
+        ab = F.interpolate(ab, size=(h, w), mode='bilinear', align_corners=False)
     return lab_tensors_to_rgb(L, ab[0].cpu())
 
 def save_overview(path, results, mean_time, pairs_per_row=2): #shows the greyscale input and colourised output side by side in a grid, with inference times
