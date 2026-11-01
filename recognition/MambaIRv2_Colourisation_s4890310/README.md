@@ -1,5 +1,11 @@
 ## Image Colourisation Using MambaIRv2: State Space Restoration
 
+This colourisation model is a pretrained MambaIRv2 denoiser network, fine tuned with new input and output layers. A greyscale image (L channel) enters through the new single input layer, intialised by the pretrained RGB filters and passes through the pretrained 36 blocks. Each are combined with window self-attention for neighbouring reigion detail, with attentive state space module for the global image detail. The new 2 channel output layer predicts the ab channels and are combined with the origional L channel input. Which is then converted back into RGB, preserving the tructure of the image. The fine tuned model was trained on the DIV2K dataset, with only a L1 loss on the ab channels.
+
+![Model architecture](images/model_diagram.png)
+
+---
+
 User: People wanting to restore old greyscale images to colourful images. (museums, libraries)
 
 Purpose: Determine whether fine tuning the MambaIRv2 can produce a clear and realistic colour output from greyscale images efficiently.
@@ -71,7 +77,7 @@ Origionally, the pretrained MambaIRv2 model takes a RGB image as an imput. I hav
 
 The DIV2K dataset is already split up into training (800 images), and validation (100 images). The presplit validation set was used as the testing set, while the training set was split again to create a validation set, which consists of 100 images, leaving the reamaining 700 for training. The 700 images for training has been augmented, there is a 50% chance for a image to be flipped horizontally, and another independent 50% chance that it is flipped vertically. Each training image is randomly cropped, 50 times per image per epoch. It is leakage free since it is split as a whole image using a fixed seed.
 
-DIV2K presplit dataset: https://data.vision.ee.ethz.ch/cvl/DIV2K/
+DIV2K presplit dataset: DIV2K Dataset. (n.d.). https://data.vision.ee.ethz.ch/cvl/DIV2K/
 
 ---
 
@@ -79,20 +85,22 @@ DIV2K presplit dataset: https://data.vision.ee.ethz.ch/cvl/DIV2K/
 
 ### Quantitative Benchmarking of Baseline vs Fine-Tuned
 **PSNR**
-PSNR shows us how distorted the reconstructed image is, a higher value indicates a less distorted reconstruction
+PSNR shows us how distorted the reconstructed image is, a higher value indicates a less distorted reconstruction. The pretrained and finetuned model has similar reconstruction performances.
 - 21.98 vs 23.15
 
 **SSIM**
-SSIM is the structural similarity index, it measures the percived quality and similarity between the output to the ground truth. It stronger represents the human visual perception as it does not calculate it from raw pixel differences. A value closer to 1 indicates an accurate reconstruction.
+SSIM is the structural similarity index, it measures the percived quality and similarity between the output to the ground truth. It stronger represents the human visual perception as it does not calculate it from raw pixel differences. A value closer to 1 indicates an accurate reconstruction. The pretrained and finetuned model has similar reconstruction performances
 - 0.8787 vs 0.9186
 
 **LPIPS**
-LPIPS is the learned perceptual image patch similarity, similarly to SSIM is represents the human visual perception. LPIPS is trained to extract high level features, while SSIM extracts structural. A low value of LPIPS results in an accurate reconstruction.
+LPIPS is the learned perceptual image patch similarity, similarly to SSIM is represents the human visual perception. LPIPS is trained to extract high level features, while SSIM extracts structural. A low value of LPIPS results in an accurate reconstruction. The pretrained and finetuned model has similar reconstruction performances.
 - 0.2748 vs 0.1808
 
 **Colourfullness**
-The definition of colourfullenss for this model has been extracted from teh following paper: https://www.researchgate.net/publication/243135534_Measuring_colorfulness_in_natural_images. It defines how vibrant the colours used in the output, it is a direct measure of the colour desaturation risk evaluated above. The colourfullness is measured as the colourfullness of the model output divided by the colourfullness of the ground truth. Therefore, a low value means the model has colour desaturation, and a value of 1 means the model output is as colourfull as the ground truth.
+The definition of colourfullenss for this model has been extracted from (Hasler & Suesstrunk, 2003). It defines how vibrant the colours used in the output, it is a direct measure of the colour desaturation risk evaluated above. The colourfullness is measured as the colourfullness of the model output divided by the colourfullness of the ground truth. Therefore, a low value means the model has colour desaturation, and a value of 1 means the model output is as colourfull as the ground truth. The pretrained is a denoiser, so will repeat the input back out as the output, therefore very low colourfullness. The finetuned outputs far greater and realistic colourisation on greyscale images.
 - 0.015 vs 0.450
+
+Colourfullness: Hasler, D., & Suesstrunk, S. E. (2003). Measuring colorfulness in natural images. Proceedings of SPIE, the International Society for Optical Engineering/Proceedings of SPIE, 5007, 87. https://doi.org/10.1117/12.477378
 
 ---
 
@@ -134,7 +142,7 @@ The MambaIRv2 model makes decisions about a region based off similar region in t
 
 **3. Slow Inference**
 
-The target inference time was 1s per image, the model is capable of only 2.3s per 512-pixel image. The model I used doesn't shrink the image to make computing quick, the full resolution image is used  by all 36 blocks. Since the cost grows with the number of pixels, not downsizing the image results in heavy computations throughout the model. To prevent this, the model could colourise the image a downscaled image, and only upscale using the ab channels.
+The target inference time was 1s per image, the model is capable of only 2.3s per 512-pixel image. The model I used doesn't shrink the image to make computing quick, the full resolution image is used  by all 36 blocks. Since the cost grows with the number of pixels, not downsizing the image results in heavy computations throughout the model. To prevent this, the model could colourise the image a downscaled image, and only upscale using the ab channels. On the predict set, the model took far longer per inference due to the significant amount of higher resolution.
 
 ---
 
