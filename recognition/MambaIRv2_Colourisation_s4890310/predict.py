@@ -11,8 +11,8 @@ import glob
 from dataset import lab_tensors_to_rgb, rgb_to_lab_tensors
 
 fine_tuned_weights = os.path.expanduser('~/runs/main/best.pth')
-pretrained_model = os.path.expanduser('~/comp3710/MambaIR/experiments/mambairv2_ColorDN_15.pth')
-input_test = os.path.expanduser('~/comp3710/greyscale-colourization/test-dataset')
+pretrained_model = os.path.expanduser('~/comp3170/MambaIR/experiments/mambairv2_ColorDN_15.pth')
+input_test = os.path.expanduser('~/comp3170/greyscale-colourization/test-dataset')
 output_test = os.path.expanduser('~/run/predictions')
 
 def sort_test_folder(path): #sorts the test folder so that images are in numerical order
