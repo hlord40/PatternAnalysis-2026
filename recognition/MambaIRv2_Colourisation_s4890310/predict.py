@@ -1,6 +1,6 @@
 import os
 import re
-from modules import LabColouriser, build_pretrained_MambaDenoiser
+from modules import build_pretrained_MambaDenoiser, LabColouriser
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -8,7 +8,7 @@ import cv2
 import time
 import glob
 
-from recognition.MambaIRv2_Colourisation_s4890310.dataset import lab_tensors_to_rgb, rgb_to_lab_tensors
+from dataset import lab_tensors_to_rgb, rgb_to_lab_tensors
 
 fine_tuned_weights = os.path.expanduser('~/runs/main/best.pth')
 pretrained_model = os.path.expanduser('~/comp3710/MambaIR/experiments/mambairv2_ColorDN_15.pth')
